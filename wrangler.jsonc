@@ -1,3 +1,4 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "zuplay-site",
@@ -6,5 +7,12 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "zuplay-db",
+      "database_id": "c71bd9d4-c39a-42a0-bb39-afdb80d06916"
+    }
+  ]
 }

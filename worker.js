@@ -1,125 +1,87 @@
 
-const HAYBI_URL = "https://haybi.id/api/h2h";
+function makeSignature(username, apiKey, refId) {
+  const bytes = new TextEncoder().encode(
+    username + apiKey + refId
+  );
 
-async function makeSignature(username, apiKey, refId) {
-  const data = new TextEncoder().encode(username + apiKey + refId);
-  const hash = await crypto.subtle.digest("MD5", data);
-  return [...new Uint8Array(hash)]
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
-}
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    }
-  });
-}
+  const view = new DataView(padded.buffer);
+  const bitLength = bytes.length * 8;
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+  view.setUint32(paddedLength - 8, bitLength >>> 0, true);
+  view.setUint32(
+    paddedLength - 4,
+    Math.floor(bitLength / 4294967296),
+    true
+  );
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type"
-        }
-      });
-    }
+  const shifts = [
+    7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+    5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
+  ];
 
-    if (url.pathname === "/api/health") {
-      return json({
-        success: true,
-        haybiConfigured: Boolean(
-          env.HAYBI_USERNAME && env.HAYBI_API_KEY
-        )
-      });
+  const K = Array.from({ length: 64 }, (_, i) =>
+    Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0
+  );
+
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    const M = [];
+
+    for (let i = 0; i < 16; i++) {
+      M[i] = view.getUint32(offset + i * 4, true);
     }
 
-    if (
-      url.pathname === "/api/haybi/products" &&
-      request.method === "POST"
-    ) {
-      if (!env.HAYBI_USERNAME || !env.HAYBI_API_KEY) {
-        return json({
-          success: false,
-          message: "Konfigurasi HAYBI belum lengkap."
-        }, 500);
+    let a = a0, b = b0, c = c0, d = d0;
+
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
       }
 
-      let input;
-      try {
-        input = await request.json();
-      } catch {
-        return json({
-          success: false,
-          message: "Format JSON tidak valid."
-        }, 400);
-      }
+      const sum = (a + f + K[i] + M[g]) >>> 0;
+      const rotated =
+        (sum << shifts[i]) | (sum >>> (32 - shifts[i]));
 
-      const refId = crypto.randomUUID();
-      const username = env.HAYBI_USERNAME;
-      const sign = await makeSignature(
-        username,
-        env.HAYBI_API_KEY,
-        refId
-      );
+      const nextB = (b + rotated) >>> 0;
 
-      const body = {
-        username,
-        ref_id: refId,
-        sign
-      };
-
-      if (input.kategori) body.kategori = input.kategori;
-      if (input.operator) body.operator = input.operator;
-
-      try {
-        const response = await fetch(`${HAYBI_URL}/produk`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-
-        const result = await response.text();
-
-        let data;
-        try {
-          data = JSON.parse(result);
-        } catch {
-          return json({
-            success: false,
-            message: "Respons HAYBI bukan JSON yang valid.",
-            upstreamStatus: response.status
-          }, 502);
-        }
-
-        return json(data, response.ok ? 200 : 502);
-      } catch (error) {
-        return json({
-          success: false,
-          message: "Koneksi ke HAYBI gagal.",
-          detail: String(error.message || "Network error")
-        }, 502);
-      }
+      a = d;
+      d = c;
+      c = b;
+      b = nextB;
     }
 
-    if (env.ASSETS) return env.ASSETS.fetch(request);
-
-    return json({
-      success: false,
-      message: "Endpoint tidak ditemukan."
-    }, 404);
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
   }
-};
-      
+
+  return [a0, b0, c0, d0].map(n =>
+    [0, 8, 16, 24].map(s =>
+      ((n >>> s) & 255).toString(16).padStart(2, "0")
+    ).join("")
+  ).join("");
+                            }
